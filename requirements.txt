@@ -1,0 +1,9 @@
+pandas
+openpyxl
+lxml
+beautifulsoup4
+html5lib
+streamlit
+rapidfuzz
+fastapi
+uvicorn[standard]
