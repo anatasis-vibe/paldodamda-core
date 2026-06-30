@@ -65,8 +65,12 @@ st.markdown("""
     text-align: left; height: auto; padding: .7rem 1rem;
     line-height: 1.5; white-space: pre-wrap;
   }
+  div[data-testid="stButton"] > button {
+    transition: transform .15s ease, border-color .15s ease;
+  }
   div[data-testid="stButton"] > button:hover {
-    border-color: #16a34a; background: #f0fdf4;
+    border-color: #16a34a;
+    transform: scale(1.02);
   }
   .recent-lbl { font-size: .78rem; color: #6b7280; margin-bottom: .3rem; }
   [data-testid="stTabs"] button { font-size: .95rem; }
@@ -181,51 +185,144 @@ with tab_search:
         push_history(q_text)
         like = "%" + q_text + "%"
 
-        products = qry(
-            "SELECT sp.id, sp.standard_name, sp.category, "
-            "COUNT(po.id) AS price_count, "
-            "COUNT(DISTINCT po.supplier_id) AS supplier_count, "
-            "MIN(po.price) AS lo, MAX(po.price) AS hi "
-            "FROM standard_products sp "
-            "LEFT JOIN product_offers po "
-            "ON po.standard_product_id = sp.id AND po.needs_review=0 AND po.price>0 "
-            "WHERE sp.standard_name LIKE ? "
-            "OR sp.id IN (SELECT standard_product_id FROM product_aliases WHERE alias LIKE ?) "
-            "GROUP BY sp.id ORDER BY price_count DESC, sp.standard_name",
-            [like, like],
+        # ① standard_name 매칭
+        sp_name_ids = {
+            r["id"] for r in qry(
+                "SELECT id FROM standard_products WHERE standard_name LIKE ?", [like]
+            )
+        }
+        # ② alias 매칭
+        alias_ids = {
+            r["standard_product_id"] for r in qry(
+                "SELECT DISTINCT standard_product_id FROM product_aliases WHERE alias LIKE ?",
+                [like],
+            )
+        }
+        # ③ 연결된 raw_items 통해 추가 발견
+        raw_mapped_ids = {
+            r["standard_product_id"] for r in qry(
+                "SELECT DISTINCT po.standard_product_id "
+                "FROM product_offers po "
+                "JOIN raw_items ri ON ri.id = po.raw_item_id "
+                "WHERE ri.raw_product_name LIKE ? AND po.standard_product_id IS NOT NULL",
+                [like],
+            )
+        }
+
+        all_sp_ids = sp_name_ids | alias_ids | raw_mapped_ids
+
+        # 매칭 유형 레이블 (첫 번째 적용 유형 우선)
+        def match_label(sp_id):
+            if sp_id in sp_name_ids:
+                return "표준상품명"
+            if sp_id in alias_ids:
+                return "Alias"
+            return "원본상품명"
+
+        # 표준상품 카드 데이터
+        products = []
+        if all_sp_ids:
+            placeholders = ",".join("?" * len(all_sp_ids))
+            products = qry(
+                "SELECT sp.id, sp.standard_name, sp.category, "
+                "COUNT(po.id) AS price_count, "
+                "COUNT(DISTINCT po.supplier_id) AS supplier_count, "
+                "MIN(po.price) AS lo, MAX(po.price) AS hi "
+                "FROM standard_products sp "
+                "LEFT JOIN product_offers po "
+                "ON po.standard_product_id = sp.id AND po.needs_review=0 AND po.price>0 "
+                "WHERE sp.id IN ({}) "
+                "GROUP BY sp.id ORDER BY price_count DESC, sp.standard_name".format(
+                    placeholders
+                ),
+                list(all_sp_ids),
+            )
+
+        # ④ 미매핑 원본상품 (needs_review=1, standard_product_id IS NULL)
+        unmatched = qry(
+            "SELECT ri.raw_product_name, "
+            "  {} AS display_name, "
+            "  MIN(CASE WHEN po.price > 0 THEN po.price END) AS lo, "
+            "  MAX(po.price) AS hi, "
+            "  COUNT(CASE WHEN po.price > 0 THEN 1 END) AS price_count "
+            "FROM product_offers po "
+            "JOIN raw_items ri ON ri.id = po.raw_item_id "
+            "JOIN suppliers s ON s.id = po.supplier_id "
+            "{} "
+            "WHERE po.standard_product_id IS NULL "
+            "AND ri.raw_product_name LIKE ? "
+            "GROUP BY ri.raw_product_name "
+            "ORDER BY price_count DESC "
+            "LIMIT 30".format(display_name_expr(), ALIAS_JOIN),
+            [like],
         )
 
-        if not products:
+        if not products and not unmatched:
             st.info("검색 결과가 없습니다.")
         else:
-            st.caption(str(len(products)) + "개 상품")
-            n_cols = min(len(products), 4)
-            cols   = st.columns(n_cols)
-            for i, p in enumerate(products):
-                price_str   = (
-                    "₩{:,}  ~  ₩{:,}".format(p["lo"], p["hi"])
-                    if p["lo"] else "가격 없음"
-                )
-                sup_cnt   = p["supplier_count"] or 0
-                price_cnt = p["price_count"] or 0
+            # 표준상품 카드
+            if products:
+                st.caption("표준상품 {}개".format(len(products)))
+                n_cols = min(len(products), 4)
+                cols   = st.columns(n_cols)
+                for i, p in enumerate(products):
+                    price_str = (
+                        "₩{:,}  ~  ₩{:,}".format(p["lo"], p["hi"])
+                        if p["lo"] else "가격 없음"
+                    )
+                    sup_cnt   = p["supplier_count"] or 0
+                    price_cnt = p["price_count"] or 0
 
-                # 카드 레이아웃: 도매처 수와 가격 수를 각각 별도 줄로
-                if sup_cnt and price_cnt:
-                    cnt_str = "{}개 도매처\n{}개 가격".format(sup_cnt, price_cnt)
-                elif price_cnt:
-                    cnt_str = "{}개 가격".format(price_cnt)
-                else:
-                    cnt_str = "가격 없음"
+                    if sup_cnt and price_cnt:
+                        cnt_str = "{}개 도매처\n{}개 가격".format(sup_cnt, price_cnt)
+                    elif price_cnt:
+                        cnt_str = "{}개 가격".format(price_cnt)
+                    else:
+                        cnt_str = "가격 없음"
 
-                label = "{}\n\n{} | {}\n\n{}".format(
-                    p["standard_name"], p["category"] or "", cnt_str, price_str,
+                    m_lbl = match_label(p["id"])
+                    label = "{}\n\n{} | {}\n\n{}\n\n▪ {}".format(
+                        p["standard_name"],
+                        p["category"] or "",
+                        cnt_str,
+                        price_str,
+                        m_lbl,
+                    )
+                    with cols[i % n_cols]:
+                        if st.button(label, key="p_" + str(p["id"]), use_container_width=True):
+                            st.session_state["selected_product"] = p
+                            for k in ["f_weight", "f_count", "f_grade"]:
+                                st.session_state.pop(k, None)
+
+            # 미매핑 원본상품 섹션
+            if unmatched:
+                if products:
+                    st.divider()
+                st.caption(
+                    "🔍 검수 필요 상품 — 원본상품명으로 찾은 {}개 (표준상품 미등록)".format(
+                        len(unmatched)
+                    )
                 )
-                with cols[i % n_cols]:
-                    if st.button(label, key="p_" + str(p["id"]), use_container_width=True):
-                        st.session_state["selected_product"] = p
-                        # 상품 바뀌면 필터 초기화
-                        for k in ["f_weight", "f_count", "f_grade"]:
-                            st.session_state.pop(k, None)
+                rows_data = []
+                for u in unmatched:
+                    price_str = (
+                        "₩{:,} ~ ₩{:,}".format(u["lo"], u["hi"])
+                        if u["lo"] else "가격 정보 없음"
+                    )
+                    rows_data.append({
+                        "원본상품명": u["raw_product_name"],
+                        "가격": price_str,
+                        "가격 수": u["price_count"] or 0,
+                    })
+                import pandas as _pd
+                st.dataframe(
+                    _pd.DataFrame(rows_data),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(
+                    "위 상품은 '✅ 검수 필요' 탭에서 표준상품에 연결하면 가격 비교에 포함됩니다."
+                )
 
     # ── 가격 비교 ──────────────────────────────────────────────────
     if st.session_state["selected_product"]:
