@@ -144,6 +144,28 @@ def run():
         except Exception:
             print("[SKIP] product_offers.product_url already exists")
 
+        # Sprint 5 (UX): 도매처 표준화 — supplier_master / supplier_alias
+        conn.executescript("""
+CREATE TABLE IF NOT EXISTS supplier_master (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name TEXT NOT NULL UNIQUE,
+    memo         TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS supplier_alias (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    raw_name           TEXT NOT NULL UNIQUE,
+    supplier_master_id INTEGER NOT NULL,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (supplier_master_id) REFERENCES supplier_master(id)
+);
+        """)
+        conn.commit()
+        for t in ["supplier_master", "supplier_alias"]:
+            n = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            print(f"[OK] {t}: {n} rows")
+
     finally:
         conn.close()
 
