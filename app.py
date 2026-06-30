@@ -1,6 +1,6 @@
 """
-PaldoDamdA OS — 도매처 가격검색 v2
-5초 안에 검색 → 최저가 확인 → 주문처 결정
+PaldoDamdA OS — 도매처 가격검색 v3
+5초 안에 검색 → 옵션 필터 → 최저가 확인 → 주문처 결정
 
 Run:
     streamlit run app.py
@@ -30,30 +30,45 @@ st.markdown("""
 <style>
   .block-container { padding-top: 1rem; max-width: 1200px; }
 
+  /* Best Buy 카드 */
   .best-card {
     background: linear-gradient(135deg, #166534, #15803d);
     color: white; border-radius: 14px;
-    padding: 1.4rem 1.8rem; margin-bottom: 1.2rem;
+    padding: 1.4rem 1.8rem; margin-bottom: 1rem;
     box-shadow: 0 4px 12px rgba(0,0,0,.15);
   }
-  .best-card .bc-label { font-size: .8rem; opacity: .8; letter-spacing: .05em; margin-bottom: .3rem; }
-  .best-card .bc-price { font-size: 2.2rem; font-weight: 700; margin: 0; line-height: 1.1; }
-  .best-card .bc-sub   { font-size: .9rem; opacity: .85; margin-top: .35rem; }
-  .best-card .bc-bdg   { margin-top: .6rem; display: flex; gap: .5rem; flex-wrap: wrap; }
-  .bc-b  { background: rgba(255,255,255,.18); border-radius: 20px; padding: 3px 10px; font-size: .78rem; }
-  .bc-bg { background: rgba(134,239,172,.25); border-radius: 20px; padding: 3px 10px; font-size: .78rem; }
-  .bc-bo { background: rgba(251,191,36,.25);  border-radius: 20px; padding: 3px 10px; font-size: .78rem; }
+  .bc-label { font-size: .8rem; opacity: .8; letter-spacing: .05em; margin-bottom: .3rem; }
+  .bc-price { font-size: 2.2rem; font-weight: 700; margin: 0; line-height: 1.1; }
+  .bc-sub   { font-size: .9rem; opacity: .85; margin-top: .35rem; }
+  .bc-bdg   { margin-top: .6rem; display: flex; gap: .5rem; flex-wrap: wrap; }
+  .bc-b  { background: rgba(255,255,255,.18); border-radius:20px; padding:3px 10px; font-size:.78rem; }
+  .bc-bg { background: rgba(134,239,172,.25); border-radius:20px; padding:3px 10px; font-size:.78rem; }
+  .bc-bo { background: rgba(251,191,36,.25);  border-radius:20px; padding:3px 10px; font-size:.78rem; }
 
-  .recent-lbl { font-size: .78rem; color: #6b7280; margin-bottom: .3rem; }
+  /* 선택 옵션 태그 */
+  .opt-bar {
+    display: flex; gap: .4rem; flex-wrap: wrap;
+    margin-bottom: .8rem; align-items: center;
+  }
+  .opt-tag {
+    background: #dcfce7; color: #15803d;
+    border: 1px solid #86efac; border-radius: 20px;
+    padding: 3px 12px; font-size: .82rem; font-weight: 600;
+  }
+  .opt-name {
+    font-size: 1rem; font-weight: 700; color: #111827; margin-right: .4rem;
+  }
 
+  /* 상품 카드 버튼 */
   div[data-testid="stButton"] > button {
     border-radius: 10px; border: 1px solid #e5e7eb;
     text-align: left; height: auto; padding: .7rem 1rem;
-    line-height: 1.4; white-space: pre-wrap;
+    line-height: 1.5; white-space: pre-wrap;
   }
   div[data-testid="stButton"] > button:hover {
     border-color: #16a34a; background: #f0fdf4;
   }
+  .recent-lbl { font-size: .78rem; color: #6b7280; margin-bottom: .3rem; }
   [data-testid="stTabs"] button { font-size: .95rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -79,29 +94,25 @@ def run_sql(sql, params=()):
 
 
 # ─── 도매처 표시명 헬퍼 ─────────────────────────────────────────────
-# suppliers.name → supplier_alias → supplier_master.display_name
-# alias 없으면 원본 suppliers.name 그대로 표시
+# supplier_alias.display_name 있으면 사용, 없으면 suppliers.name 원본
 
-DISPLAY_NAME_SQL = """
-    COALESCE(sm.display_name, s.name)
-"""
+ALIAS_JOIN = "LEFT JOIN supplier_alias sa ON sa.raw_name = s.name"
 
-SUPPLIER_JOINS = """
-    LEFT JOIN supplier_alias sa  ON sa.raw_name = s.name
-    LEFT JOIN supplier_master sm ON sm.id = sa.supplier_master_id
-"""
+
+def display_name_expr():
+    return "COALESCE(sa.display_name, s.name)"
+
 
 # ─── 배송비 포맷 ─────────────────────────────────────────────────────
 
 def fmt_fee(fee):
-    """None / 0 → '-', 양수 → '₩X,XXX'"""
     if not fee:
         return "-"
     try:
         v = int(fee)
         return "₩{:,}".format(v) if v > 0 else "-"
     except Exception:
-        return str(fee)
+        return "-"
 
 
 # ─── 세션 초기화 ────────────────────────────────────────────────────
@@ -139,7 +150,7 @@ tab_search, tab_review, tab_import, tab_history, tab_supplier = st.tabs([
 
 with tab_search:
 
-    # 검색창
+    # ── 검색창 ────────────────────────────────────────────────────
     sc1, sc2 = st.columns([6, 1])
     with sc1:
         q_input = st.text_input(
@@ -165,13 +176,11 @@ with tab_search:
     if not q_text and (q_input or search_btn):
         q_text = q_input
 
-    # 검색 실행
+    # ── 검색 실행 ─────────────────────────────────────────────────
     if q_text:
         push_history(q_text)
         like = "%" + q_text + "%"
 
-        # 도매처 수 = DISTINCT raw supplier (alias 매핑 전 기준)
-        # 가격 수   = total offer 행 수
         products = qry(
             "SELECT sp.id, sp.standard_name, sp.category, "
             "COUNT(po.id) AS price_count, "
@@ -193,16 +202,18 @@ with tab_search:
             n_cols = min(len(products), 4)
             cols   = st.columns(n_cols)
             for i, p in enumerate(products):
-                price_str = (
+                price_str   = (
                     "₩{:,}  ~  ₩{:,}".format(p["lo"], p["hi"])
                     if p["lo"] else "가격 없음"
                 )
                 sup_cnt   = p["supplier_count"] or 0
                 price_cnt = p["price_count"] or 0
-                if sup_cnt and price_cnt > sup_cnt:
-                    cnt_str = "{}개 도매처 / {}개 가격".format(sup_cnt, price_cnt)
-                elif sup_cnt:
-                    cnt_str = "{}개 도매처".format(sup_cnt)
+
+                # 카드 레이아웃: 도매처 수와 가격 수를 각각 별도 줄로
+                if sup_cnt and price_cnt:
+                    cnt_str = "{}개 도매처\n{}개 가격".format(sup_cnt, price_cnt)
+                elif price_cnt:
+                    cnt_str = "{}개 가격".format(price_cnt)
                 else:
                     cnt_str = "가격 없음"
 
@@ -212,6 +223,9 @@ with tab_search:
                 with cols[i % n_cols]:
                     if st.button(label, key="p_" + str(p["id"]), use_container_width=True):
                         st.session_state["selected_product"] = p
+                        # 상품 바뀌면 필터 초기화
+                        for k in ["f_weight", "f_count", "f_grade"]:
+                            st.session_state.pop(k, None)
 
     # ── 가격 비교 ──────────────────────────────────────────────────
     if st.session_state["selected_product"]:
@@ -226,10 +240,10 @@ with tab_search:
                 st.session_state["selected_product"] = None
                 st.rerun()
 
-        # 가격 비교 쿼리 — display_name 적용
-        offers = qry(
+        # 전체 가격 데이터 로드 (필터 전)
+        all_offers = qry(
             "SELECT "
-            "  COALESCE(sm.display_name, s.name) AS display_name, "
+            "  {} AS display_name, "
             "  s.name AS raw_name, "
             "  po.price, "
             "  ri.raw_product_name AS orig, ri.raw_option AS opt, "
@@ -243,128 +257,189 @@ with tab_search:
             "  sf.received_date AS fdate "
             "FROM product_offers po "
             "JOIN suppliers s ON s.id = po.supplier_id "
-            + SUPPLIER_JOINS +
+            "{} "
             "LEFT JOIN raw_items ri ON ri.id = po.raw_item_id "
             "LEFT JOIN source_files sf ON sf.id = ri.source_file_id "
             "WHERE po.standard_product_id = ? "
             "AND po.needs_review = 0 AND po.price IS NOT NULL AND po.price > 0 "
-            "ORDER BY po.price ASC",
+            "ORDER BY po.price ASC".format(display_name_expr(), ALIAS_JOIN),
             [p["id"]],
         )
 
-        if not offers:
+        if not all_offers:
             st.info("가격 데이터가 없습니다.")
         else:
-            best  = offers[0]
-            w_str = "{}{}".format(best["wv"], best["wu"]) if best["wv"] else ""
-            c_str = "{}{}".format(best["cv"], best["cu"]) if best["cv"] else ""
-            spec  = " · ".join(x for x in [w_str, c_str, best["grade"]] if x)
+            # ── 옵션 필터 UI ────────────────────────────────────────
 
-            # 배송비 배지
-            bdg = ""
-            jeju_fee   = fmt_fee(best["jeju_fee"])
-            island_fee = fmt_fee(best["island_fee"])
-            if best["jeju"] and best["jeju"] not in ("N", ""):
-                bdg += '<span class="bc-bg">🏝 제주 ' + jeju_fee + '</span>'
-            if best["island"] and best["island"] not in ("N", ""):
-                bdg += '<span class="bc-bo">⛵ 도서 ' + island_fee + '</span>'
-            if best["st"]:
-                bdg += '<span class="bc-b">📦 ' + str(best["st"]) + '</span>'
-            if not bdg:
-                bdg = '<span class="bc-b">배송 정보 없음</span>'
+            # 가능한 값 추출 (빈 값 제외)
+            weights = sorted(set(
+                "{}{}".format(o["wv"], o["wu"])
+                for o in all_offers if o["wv"] is not None
+            ))
+            counts = sorted(set(
+                "{}{}".format(o["cv"], o["cu"])
+                for o in all_offers if o["cv"] is not None
+            ))
+            grades = sorted(set(o["grade"] for o in all_offers if o["grade"]))
 
-            st.markdown(
-                '<div class="best-card">'
-                '<div class="bc-label">🥇 추천 구매</div>'
-                '<div class="bc-price">₩{price:,}</div>'
-                '<div class="bc-sub">{sup}{spec}</div>'
-                '<div class="bc-bdg">{bdg}</div>'
-                '</div>'.format(
-                    price=best["price"],
-                    sup=best["display_name"] + ("  ·  " if spec else ""),
-                    spec=spec,
-                    bdg=bdg,
-                ),
-                unsafe_allow_html=True,
-            )
+            # 필터가 선택 가능한 경우만 위젯 표시
+            has_filter = weights or counts or grades
+            if has_filter:
+                f_cols = st.columns(3)
+                with f_cols[0]:
+                    sel_weight = st.multiselect(
+                        "중량", weights, key="f_weight",
+                        placeholder="전체" if weights else "데이터 없음",
+                    )
+                with f_cols[1]:
+                    sel_count = st.multiselect(
+                        "입수 / 과수", counts, key="f_count",
+                        placeholder="전체" if counts else "데이터 없음",
+                    )
+                with f_cols[2]:
+                    sel_grade = st.multiselect(
+                        "등급", grades, key="f_grade",
+                        placeholder="전체" if grades else "데이터 없음",
+                    )
+            else:
+                sel_weight = sel_count = sel_grade = []
 
-            # 가격 비교 테이블
-            detail_on = st.toggle("상세 보기", value=False)
-            st.caption("{}개 가격".format(len(offers)))
+            # 필터 적용
+            offers = all_offers
+            if sel_weight:
+                offers = [o for o in offers
+                          if "{}{}".format(o["wv"] or "", o["wu"] or "") in sel_weight]
+            if sel_count:
+                offers = [o for o in offers
+                          if "{}{}".format(o["cv"] or "", o["cu"] or "") in sel_count]
+            if sel_grade:
+                offers = [o for o in offers if o["grade"] in sel_grade]
 
-            rows = []
-            for rank, o in enumerate(offers, 1):
-                w = "{}{}".format(o["wv"], o["wu"]) if o["wv"] else ""
-                c = "{}{}".format(o["cv"], o["cu"]) if o["cv"] else ""
+            if not offers:
+                st.warning("선택한 옵션에 해당하는 가격 데이터가 없습니다.")
+            else:
+                # ── 선택 옵션 태그 + Best Buy ─────────────────────
+                active_tags = sel_weight + sel_count + sel_grade
+                tag_html = '<div class="opt-bar">'
+                tag_html += '<span class="opt-name">{}</span>'.format(p["standard_name"])
+                for t in active_tags:
+                    tag_html += '<span class="opt-tag">{}</span>'.format(t)
+                tag_html += '</div>'
+                st.markdown(tag_html, unsafe_allow_html=True)
 
-                # 배송비 컬럼 — 없으면 "-", 있으면 금액
-                base_ship  = fmt_fee(o["base_ship"])
-                jeju_disp  = fmt_fee(o["jeju_fee"])  if o["jeju"]   not in (None, "N", "") else "-"
-                island_disp = fmt_fee(o["island_fee"]) if o["island"] not in (None, "N", "") else "-"
+                # Best Buy 카드
+                best  = offers[0]
+                w_str = "{}{}".format(best["wv"], best["wu"]) if best["wv"] is not None else ""
+                c_str = "{}{}".format(best["cv"], best["cu"]) if best["cv"] is not None else ""
+                spec  = " · ".join(x for x in [w_str, c_str, best["grade"]] if x)
 
-                row = {
-                    "#":       rank,
-                    "도매처":  o["display_name"],
-                    "공급가":  "₩{:,}".format(o["price"]),
-                    "출하":    o["st"] or "-",
-                    "기본배송": base_ship,
-                    "제주추가": jeju_disp,
-                    "도서추가": island_disp,
-                }
-                if detail_on:
-                    row["원본상품명"] = o["orig"] or ""
-                    row["중량"]      = w
-                    row["입수"]      = c
-                    row["등급"]      = o["grade"] or ""
-                    row["재배"]      = o["cult"] or ""
-                    row["태그"]      = o["tag"] or ""
-                    row["파일날짜"]  = o["fdate"] or ""
-                rows.append(row)
+                bdg = ""
+                if best["jeju"] and best["jeju"] not in ("N", ""):
+                    bdg += '<span class="bc-bg">🏝 제주 ' + fmt_fee(best["jeju_fee"]) + '</span>'
+                if best["island"] and best["island"] not in ("N", ""):
+                    bdg += '<span class="bc-bo">⛵ 도서 ' + fmt_fee(best["island_fee"]) + '</span>'
+                if best["st"]:
+                    bdg += '<span class="bc-b">📦 ' + str(best["st"]) + '</span>'
+                if not bdg:
+                    bdg = '<span class="bc-b">배송 정보 없음</span>'
 
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True,
-                         column_config={
-                             "#":       st.column_config.NumberColumn(width="small"),
-                             "공급가":  st.column_config.TextColumn(width="medium"),
-                             "도매처":  st.column_config.TextColumn(width="medium"),
-                         })
-
-            with st.expander("📥 CSV 다운로드"):
-                csv = df.to_csv(index=False, encoding="utf-8-sig")
-                st.download_button("CSV 저장", data=csv,
-                                   file_name="{}_가격비교.csv".format(p["standard_name"]),
-                                   mime="text/csv")
-
-            # 상품 상세
-            with st.expander("상품 상세 정보"):
-                aliases = qry(
-                    "SELECT alias FROM product_aliases WHERE standard_product_id=?", [p["id"]]
+                st.markdown(
+                    '<div class="best-card">'
+                    '<div class="bc-label">🥇 추천 구매</div>'
+                    '<div class="bc-price">₩{price:,}</div>'
+                    '<div class="bc-sub">{sup}{spec}</div>'
+                    '<div class="bc-bdg">{bdg}</div>'
+                    '</div>'.format(
+                        price=best["price"],
+                        sup=best["display_name"] + ("  ·  " if spec else ""),
+                        spec=spec,
+                        bdg=bdg,
+                    ),
+                    unsafe_allow_html=True,
                 )
-                last_upd = qry(
-                    "SELECT MAX(sf.received_date) AS d "
-                    "FROM product_offers po "
-                    "LEFT JOIN raw_items ri ON ri.id=po.raw_item_id "
-                    "LEFT JOIN source_files sf ON sf.id=ri.source_file_id "
-                    "WHERE po.standard_product_id=?",
-                    [p["id"]],
-                )
-                prices = [o["price"] for o in offers]
-                avg_p  = int(sum(prices) / len(prices)) if prices else 0
 
-                d1, d2 = st.columns(2)
-                with d1:
-                    st.write("**표준상품명:** " + p["standard_name"])
-                    st.write("**카테고리:** " + (p["category"] or "-"))
-                    alias_str = ", ".join(r["alias"] for r in aliases) if aliases else "-"
-                    st.write("**Alias:** " + alias_str)
-                with d2:
-                    sup_cnt = p.get("supplier_count") or len({o["raw_name"] for o in offers})
-                    st.write("**도매처 수:** {}개".format(sup_cnt))
-                    st.write("**최저가:** ₩{:,}".format(min(prices)) if prices else "-")
-                    st.write("**최고가:** ₩{:,}".format(max(prices)) if prices else "-")
-                    st.write("**평균가:** ₩{:,}".format(avg_p) if avg_p else "-")
-                    d = last_upd[0]["d"] if last_upd else None
-                    st.write("**최근 업데이트:** " + (d or "-"))
+                # ── 가격 비교 테이블 ─────────────────────────────
+                detail_on = st.toggle("상세 보기", value=False)
+                filtered_label = (
+                    "{}개 가격".format(len(offers))
+                    if len(offers) == len(all_offers)
+                    else "{}개 가격 (필터 적용, 전체 {}개)".format(len(offers), len(all_offers))
+                )
+                st.caption(filtered_label)
+
+                rows = []
+                for rank, o in enumerate(offers, 1):
+                    w = "{}{}".format(o["wv"], o["wu"]) if o["wv"] is not None else ""
+                    c = "{}{}".format(o["cv"], o["cu"]) if o["cv"] is not None else ""
+
+                    jeju_d   = fmt_fee(o["jeju_fee"])   if o["jeju"]   not in (None, "N", "") else "-"
+                    island_d = fmt_fee(o["island_fee"]) if o["island"] not in (None, "N", "") else "-"
+
+                    row = {
+                        "#":        rank,
+                        "도매처":   o["display_name"],   # alias 있으면 display_name
+                        "공급가":   "₩{:,}".format(o["price"]),
+                        "출하":     o["st"] or "-",
+                        "기본배송": fmt_fee(o["base_ship"]),
+                        "제주추가": jeju_d,
+                        "도서추가": island_d,
+                    }
+                    if detail_on:
+                        row["원본상품명"]  = o["orig"] or ""
+                        row["원본도매처"]  = o["raw_name"]  # 상세보기에서만 원본명
+                        row["중량"]        = w
+                        row["입수"]        = c
+                        row["등급"]        = o["grade"] or ""
+                        row["재배"]        = o["cult"] or ""
+                        row["태그"]        = o["tag"] or ""
+                        row["파일날짜"]    = o["fdate"] or ""
+                    rows.append(row)
+
+                df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "#":      st.column_config.NumberColumn(width="small"),
+                                 "공급가": st.column_config.TextColumn(width="medium"),
+                                 "도매처": st.column_config.TextColumn(width="medium"),
+                             })
+
+                with st.expander("📥 CSV 다운로드"):
+                    csv = df.to_csv(index=False, encoding="utf-8-sig")
+                    st.download_button("CSV 저장", data=csv,
+                                       file_name="{}_가격비교.csv".format(p["standard_name"]),
+                                       mime="text/csv")
+
+                # 상품 상세
+                with st.expander("상품 상세 정보"):
+                    aliases = qry(
+                        "SELECT alias FROM product_aliases WHERE standard_product_id=?",
+                        [p["id"]],
+                    )
+                    last_upd = qry(
+                        "SELECT MAX(sf.received_date) AS d "
+                        "FROM product_offers po "
+                        "LEFT JOIN raw_items ri ON ri.id=po.raw_item_id "
+                        "LEFT JOIN source_files sf ON sf.id=ri.source_file_id "
+                        "WHERE po.standard_product_id=?",
+                        [p["id"]],
+                    )
+                    prices = [o["price"] for o in offers]
+                    avg_p  = int(sum(prices) / len(prices)) if prices else 0
+
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        st.write("**표준상품명:** " + p["standard_name"])
+                        st.write("**카테고리:** " + (p["category"] or "-"))
+                        alias_str = ", ".join(r["alias"] for r in aliases) if aliases else "-"
+                        st.write("**Alias:** " + alias_str)
+                    with d2:
+                        raw_sups = sorted({o["raw_name"] for o in offers})
+                        st.write("**도매처 수:** {}개".format(len(raw_sups)))
+                        st.write("**최저가:** ₩{:,}".format(min(prices)) if prices else "-")
+                        st.write("**최고가:** ₩{:,}".format(max(prices)) if prices else "-")
+                        st.write("**평균가:** ₩{:,}".format(avg_p) if avg_p else "-")
+                        d = last_upd[0]["d"] if last_upd else None
+                        st.write("**최근 업데이트:** " + (d or "-"))
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -450,8 +525,7 @@ with tab_review:
                             default_idx = i
                             break
                 chosen = st.selectbox(
-                    "선택", sp_keys,
-                    index=default_idx,
+                    "선택", sp_keys, index=default_idx,
                     key="sp_" + str(item["id"]),
                     label_visibility="collapsed",
                 )
@@ -508,7 +582,7 @@ with tab_import:
         if raw_path:
             if Path(raw_path).exists():
                 file_to_import = raw_path
-                st.caption("파일 확인 완료: " + raw_path)
+                st.caption("파일 확인: " + raw_path)
             else:
                 st.warning("파일을 찾을 수 없습니다.")
 
@@ -578,93 +652,88 @@ with tab_history:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# TAB 5 — 도매처 관리 (supplier_master / supplier_alias)
+# TAB 5 — 도매처 관리
+# supplier_alias: raw_name → display_name (supplier_master 없이 직접 매핑)
 # ═══════════════════════════════════════════════════════════════════
 
 with tab_supplier:
     st.subheader("도매처 관리")
     st.caption(
-        "원본 도매처명(파일에서 추출된 이름)을 표준도매처명으로 매핑합니다. "
-        "DB 원본은 절대 수정하지 않습니다."
+        "원본 도매처명(파일에서 자동 추출된 이름)을 화면 표시용 이름으로 설정합니다. "
+        "DB 원본(suppliers.name)은 절대 수정하지 않습니다."
     )
 
-    # ── 표준도매처 등록 ────────────────────────────────────────────
-    st.markdown("#### 표준도매처 등록")
-    col_add1, col_add2 = st.columns([4, 1])
-    with col_add1:
-        new_display = st.text_input("표준도매처명", placeholder="예: 산들리에", key="new_master")
-    with col_add2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("등록", key="add_master") and new_display.strip():
-            try:
-                run_sql(
-                    "INSERT OR IGNORE INTO supplier_master (display_name) VALUES (?)",
-                    (new_display.strip(),),
-                )
-                st.success("등록됨: " + new_display.strip())
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-    masters = qry(
-        "SELECT sm.id, sm.display_name, COUNT(sa.id) AS alias_count "
-        "FROM supplier_master sm "
-        "LEFT JOIN supplier_alias sa ON sa.supplier_master_id = sm.id "
-        "GROUP BY sm.id ORDER BY sm.display_name"
+    # 전체 도매처 목록 (alias 포함 현황)
+    all_sups = qry(
+        "SELECT s.name AS raw_name, sa.display_name, "
+        "COUNT(po.id) AS offer_count "
+        "FROM suppliers s "
+        "LEFT JOIN supplier_alias sa ON sa.raw_name = s.name "
+        "LEFT JOIN product_offers po ON po.supplier_id = s.id "
+        "GROUP BY s.id ORDER BY offer_count DESC, s.name"
     )
 
-    if not masters:
-        st.info("등록된 표준도매처가 없습니다. 위에서 먼저 등록해주세요.")
+    if not all_sups:
+        st.info("등록된 도매처가 없습니다.")
     else:
-        st.divider()
-        st.markdown("#### 원본명 → 표준도매처 연결")
-        st.caption("아직 표준도매처와 연결되지 않은 원본 도매처명을 매핑합니다.")
+        # 미설정(alias 없음) vs 설정됨 분리
+        no_alias = [r for r in all_sups if not r["display_name"]]
+        has_alias = [r for r in all_sups if r["display_name"]]
 
-        # 미매핑 원본 목록
-        unmapped = qry(
-            "SELECT s.name FROM suppliers s "
-            "WHERE s.name NOT IN (SELECT raw_name FROM supplier_alias) "
-            "ORDER BY s.name"
-        )
+        if no_alias:
+            st.markdown("#### 표시명 미설정 ({})".format(len(no_alias)))
+            st.caption("도매처 이름을 직접 입력하면 가격 비교 화면에서 해당 이름으로 표시됩니다.")
 
-        if not unmapped:
-            st.success("모든 도매처가 표준도매처에 연결됐습니다. 🎉")
-        else:
-            master_options = {m["display_name"]: m["id"] for m in masters}
-
-            for raw in unmapped:
-                rname = raw["name"]
+            for row in no_alias:
                 c1, c2, c3 = st.columns([4, 3, 1])
-                c1.write(rname)
+                c1.write("**{}**".format(row["raw_name"]))
+                c1.caption("{}개 가격".format(row["offer_count"]))
                 with c2:
-                    chosen = st.selectbox(
-                        "표준도매처", list(master_options.keys()),
-                        key="map_" + rname[:30],
+                    new_name = st.text_input(
+                        "표시 이름",
+                        placeholder="예: 산들리에",
+                        key="alias_" + row["raw_name"][:40],
                         label_visibility="collapsed",
                     )
                 with c3:
-                    if st.button("연결", key="link_" + rname[:30]):
-                        try:
-                            run_sql(
-                                "INSERT OR IGNORE INTO supplier_alias "
-                                "(raw_name, supplier_master_id) VALUES (?,?)",
-                                (rname, master_options[chosen]),
-                            )
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("저장", key="save_" + row["raw_name"][:40]):
+                        if new_name.strip():
+                            try:
+                                run_sql(
+                                    "INSERT INTO supplier_alias (raw_name, display_name) "
+                                    "VALUES (?, ?) "
+                                    "ON CONFLICT(raw_name) DO UPDATE SET display_name=excluded.display_name",
+                                    (row["raw_name"], new_name.strip()),
+                                )
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+                        else:
+                            st.warning("이름을 입력해주세요.")
 
-        st.divider()
-        st.markdown("#### 현재 매핑 현황")
-        mapped = qry(
-            "SELECT sm.display_name, sa.raw_name, sa.created_at "
-            "FROM supplier_alias sa "
-            "JOIN supplier_master sm ON sm.id = sa.supplier_master_id "
-            "ORDER BY sm.display_name, sa.raw_name"
-        )
-        if mapped:
-            df_map = pd.DataFrame(mapped)
-            df_map.columns = ["표준도매처명", "원본명", "연결일시"]
-            st.dataframe(df_map, use_container_width=True, hide_index=True)
-        else:
-            st.info("연결된 매핑이 없습니다.")
+        if has_alias:
+            st.divider()
+            st.markdown("#### 표시명 설정됨 ({})".format(len(has_alias)))
+            for row in has_alias:
+                c1, c2, c3, c4 = st.columns([3, 3, 3, 1])
+                c1.write(row["raw_name"])
+                c2.write("→  **{}**".format(row["display_name"]))
+                with c3:
+                    edit_name = st.text_input(
+                        "수정",
+                        value=row["display_name"],
+                        key="edit_" + row["raw_name"][:40],
+                        label_visibility="collapsed",
+                    )
+                with c4:
+                    if st.button("수정", key="upd_" + row["raw_name"][:40]):
+                        if edit_name.strip():
+                            try:
+                                run_sql(
+                                    "UPDATE supplier_alias SET display_name=? WHERE raw_name=?",
+                                    (edit_name.strip(), row["raw_name"]),
+                                )
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
