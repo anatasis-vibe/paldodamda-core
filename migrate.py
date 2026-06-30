@@ -136,6 +136,14 @@ def run():
             n = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
             print(f"     {t}: {n} rows")
 
+        # Sprint 5: product_url column on product_offers
+        try:
+            conn.execute("ALTER TABLE product_offers ADD COLUMN product_url TEXT")
+            conn.commit()
+            print("[OK] product_offers.product_url column added")
+        except Exception:
+            print("[SKIP] product_offers.product_url already exists")
+
     finally:
         conn.close()
 
